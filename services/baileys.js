@@ -16,6 +16,7 @@ class WhatsAppService {
     this.connectionUpdateHandler = null;
     this.reconnectAttempts = 0;
     this.MAX_RECONNECT_ATTEMPTS = 5;
+    this.heartbeatInterval = null;
   }
 
   resetReconnectAttempts() {
@@ -61,8 +62,13 @@ class WhatsAppService {
     });
   }
 
-  // Socket ve eventleri güvenli temizleme
+  // Socket, eventler ve heartbeat döngüsünü güvenli temizleme
   async cleanupSocket() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+
     if (this.sock) {
       try {
         this.sock.ev.removeAllListeners('connection.update');
@@ -99,9 +105,14 @@ class WhatsAppService {
         version,
         auth: state,
         printQRInTerminal: true,
-        browser: ['Baileys REST API', 'Chrome', '1.0.0'],
+        browser: ['Ubuntu', 'Chrome', '20.0.04'], // WhatsApp'ın bağlantıyı düşürmemesi için kararlı masaüstü kimliği
         logger: pino({ level: 'silent' }),
-        syncFullHistory: false, // Bellek şişmesini önler
+        syncFullHistory: false, // Bellek taşmasını engeller
+        keepAliveIntervalMs: 10000, // 10 saniyede bir ping atarak soketi canlı tutar
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
+        emitOwnEvents: false,
+        markOnlineOnConnect: true, // Her zaman çevrim içi/aktif kalmasını sağlar
       });
 
       this.sock.ev.on('connection.update', async (update) => {
@@ -113,6 +124,11 @@ class WhatsAppService {
 
         if (connection === 'close') {
           this.isConnected = false;
+          if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+          }
+
           const statusCode = (lastDisconnect?.error instanceof Boom)?.output?.statusCode;
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
@@ -130,6 +146,19 @@ class WhatsAppService {
           this.qr = null;
           this.resetReconnectAttempts();
           logger.info({ msg: 'WhatsApp connection successful!' });
+
+          // 15 saniyede bir WhatsApp'a varlık sinyali (heartbeat) göndererek uyku modunu engeller
+          if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+          this.heartbeatInterval = setInterval(async () => {
+            if (this.sock && this.isConnected) {
+              try {
+                await this.sock.sendPresenceUpdate('available');
+              } catch (err) {
+                // Sessiz geç
+              }
+            }
+          }, 15000);
+
           await WhatsAppService.notifyWebhook('connection', { status: 'connected' });
         }
       });
@@ -146,7 +175,6 @@ class WhatsAppService {
               return;
             }
 
-            // Gelişmiş metin çıkarma (buton ve interaktif yanıtlar dahil)
             const textContent = 
               msg.message.conversation || 
               msg.message.extendedTextMessage?.text || 
