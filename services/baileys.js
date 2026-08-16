@@ -5,6 +5,9 @@ const pino = require('pino');
 const fs = require('fs').promises;
 const { logger, errorLogger } = require('../utils/logger');
 
+// n8n Webhook URL Tanımı
+const N8N_WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://n8n.emregormez.com/webhook/3243acbc-d136-4570-8d9c-0138bd1bc07a';
+
 class WhatsAppService {
   constructor() {
     this.sock = null;
@@ -24,7 +27,6 @@ class WhatsAppService {
     return new Promise((resolve) => {
       let timeoutId = null;
 
-      // Function to cleanup event handlers
       const cleanup = () => {
         if (timeoutId) clearTimeout(timeoutId);
         if (this.connectionUpdateHandler && this.sock?.ev) {
@@ -35,7 +37,6 @@ class WhatsAppService {
 
       timeoutId = setTimeout(() => {
         cleanup();
-        // Resolve with null on timeout
         resolve(null);
       }, timeout);
 
@@ -63,7 +64,6 @@ class WhatsAppService {
 
   async initialize(isReconnecting = false) {
     try {
-      // Check if session directory exists
       try {
         await fs.access(this.sessionPath);
       } catch (error) {
@@ -102,7 +102,6 @@ class WhatsAppService {
         const { connection, lastDisconnect } = update;
 
         if (connection === 'close') {
-          // If already connected and trying to reconnect, cancel the operation
           if (this.isConnected && isReconnecting) {
             logger.info({
               msg: 'Connection already active, reconnection cancelled',
@@ -135,53 +134,76 @@ class WhatsAppService {
 
       this.sock.ev.on('creds.update', saveCreds);
 
+      // --- GELEN MESAJLARI İŞLEME VE n8n'E İLETME ALANI ---
       this.sock.ev.on('messages.upsert', async (m) => {
         if (m.type === 'notify') {
           try {
             await Promise.all(m.messages.map(async (msg) => {
-              // Debug log for raw message
-              logger.debug({
-                msg: 'Raw message received',
-                data: msg,
-              });
+              // Kendi gönderdiğiniz mesajları, boş mesajları veya grup mesajlarını yoksay
+              if (!msg.message || msg.key.fromMe || msg.key.remoteJid?.endsWith('@g.us')) {
+                return;
+              }
 
-              // Extract relevant message information
-              const messageInfo = {
-                id: msg.key.id,
-                from: msg.key.remoteJid,
-                fromMe: msg.key.fromMe,
-                timestamp: msg.messageTimestamp,
-                type: Object.keys(msg.message || {})[0],
-                pushName: msg.pushName,
-                content: WhatsAppService.extractMessageContent(msg),
-                isGroup: msg.key.remoteJid?.endsWith('@g.us') || false,
+              // Mesaj içeriğini metin olarak çıkar
+              const textContent = 
+                msg.message.conversation || 
+                msg.message.extendedTextMessage?.text || 
+                msg.message.imageMessage?.caption || 
+                msg.message.videoMessage?.caption || 
+                '';
+
+              if (!textContent) return;
+
+              const senderJid = msg.key.remoteJid;
+              const senderName = msg.pushName || 'WhatsApp Kullanıcısı';
+              const rawPhoneNumber = senderJid.replace('@s.whatsapp.net', '');
+
+              // n8n 'Bilgiler' node'unun tam olarak beklediği veri yapısı
+              const n8nPayload = {
+                chat_id: senderJid,
+                message: textContent,
+                timestamp: new Date().toISOString(),
+                attendees: [
+                  {
+                    attendee_name: senderName
+                  }
+                ],
+                account_info: {
+                  phone_number: rawPhoneNumber
+                }
               };
 
-              // Debug log for processed message
-              logger.debug({
-                msg: 'Processed message info',
-                data: messageInfo,
-              });
+              // n8n Webhook'una doğrudan POST isteği at
+              try {
+                const response = await fetch(N8N_WEBHOOK_URL, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Baileys-n8n-Bridge'
+                  },
+                  body: JSON.stringify(n8nPayload),
+                });
 
-              // Send to webhook
-              await WhatsAppService.notifyWebhook('message.received', messageInfo);
-              logger.info({
-                msg: 'New message processed',
-                messageId: messageInfo.id,
-                from: messageInfo.from,
-                type: messageInfo.type,
-                content: messageInfo.content,
-                isGroup: messageInfo.isGroup,
-                timestamp: new Date(messageInfo.timestamp * 1000).toISOString(),
-              });
+                if (!response.ok) {
+                  throw new Error(`n8n HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                logger.info({
+                  msg: 'Mesaj başarıyla n8n sistemine iletildi',
+                  from: senderJid,
+                  content: textContent,
+                });
+              } catch (n8nError) {
+                errorLogger.error({
+                  msg: 'n8n iletim hatası',
+                  error: n8nError.message,
+                });
+              }
+
             }));
           } catch (error) {
             errorLogger.error({
               msg: 'Error processing incoming message',
-              error: error.message,
-            });
-            await WhatsAppService.notifyWebhook('error', {
-              type: 'message_processing_error',
               error: error.message,
             });
           }
@@ -191,7 +213,6 @@ class WhatsAppService {
       // Wait for QR code or successful connection
       const qr = await this.waitForQR();
 
-      // If QR code is received
       if (qr) {
         await WhatsAppService.notifyWebhook('connection', { status: 'waiting_qr', qr });
         return {
@@ -201,7 +222,6 @@ class WhatsAppService {
         };
       }
 
-      // If connection is successful
       if (this.isConnected) {
         return {
           success: true,
@@ -210,7 +230,6 @@ class WhatsAppService {
         };
       }
 
-      // In case of timeout or other issues
       return {
         success: false,
         status: 'error',
@@ -233,15 +252,12 @@ class WhatsAppService {
 
   async handleLogout(reason = 'normal_logout') {
     try {
-      // Clean up session files
       await fs.rm(this.sessionPath, { recursive: true, force: true });
 
-      // Reset state
       this.sock = null;
       this.isConnected = false;
       this.qr = null;
 
-      // Notify webhook
       await WhatsAppService.notifyWebhook('connection', {
         status: 'logged_out',
         reason,
@@ -295,7 +311,7 @@ class WhatsAppService {
   }
 
   static async notifyWebhook(event, data) {
-    const webhookUrl = process.env.WEBHOOK_URL;
+    const webhookUrl = process.env.WEBHOOK_URL || N8N_WEBHOOK_URL;
     if (!webhookUrl) {
       logger.warn({
         msg: 'Webhook URL not configured, skipping notification',
@@ -372,7 +388,6 @@ class WhatsAppService {
     }
 
     try {
-      // Check if the number exists on WhatsApp
       const [result] = await this.sock.onWhatsApp(phoneNumber.replace(/[^\d]/g, ''));
 
       if (result) {
@@ -407,11 +422,9 @@ class WhatsAppService {
     }
   }
 
-  // Change to static method
   static extractMessageContent(msg) {
     if (!msg.message) return null;
 
-    // Get the first message type (text, image, video, etc.)
     const messageType = Object.keys(msg.message)[0];
     const messageContent = msg.message[messageType];
 
