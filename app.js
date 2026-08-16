@@ -50,4 +50,7 @@ app.listen(PORT, HOST, () => {
   logger.info(`Server running at http://${HOST}:${PORT}/`);
 });
 
+const axios = require('axios');
+const N8N_WEBHOOK_URL = 'https://n8n.emregormez.com/webhook/3243acbc-d136-4570-8d9c-0138bd1bc07a';
+
 module.exports = app;
