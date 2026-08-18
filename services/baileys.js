@@ -180,23 +180,27 @@ class WhatsAppService {
               msg.message.extendedTextMessage?.text || 
               msg.message.imageMessage?.caption || 
               msg.message.videoMessage?.caption || 
-              msg.message.buttonsResponseMessage?.selectedButtonId ||
-              msg.message.templateButtonReplyMessage?.selectedId ||
-              msg.message.listResponseMessage?.singleSelectReply?.selectedRowId ||
+              msg.message.buttonsResponseMessage?.selectedButtonId || 
+              msg.message.templateButtonReplyMessage?.selectedId || 
+              msg.message.listResponseMessage?.singleSelectReply?.selectedRowId || 
               '';
 
             if (!textContent) return;
 
+            // Gerçek JID tespiti (LID veya standart telefon numarası)
             const senderJid = msg.key.remoteJid;
+            const actualSender = msg.key.participant || msg.participant || senderJid;
+            const cleanNumber = actualSender.replace(/@.+/, '').replace(/[^\d]/g, '');
+
             const senderName = msg.pushName || 'WhatsApp Kullanıcısı';
-            const rawPhoneNumber = senderJid.replace(/@.+/, '');
 
             const n8nPayload = {
               chat_id: senderJid,
+              sender: actualSender,
               message: textContent,
               timestamp: new Date().toISOString(),
               attendees: [{ attendee_name: senderName }],
-              account_info: { phone_number: rawPhoneNumber }
+              account_info: { phone_number: cleanNumber }
             };
 
             try {
@@ -344,9 +348,12 @@ class WhatsAppService {
     }
 
     try {
-      let targetJid = to;
+      let targetJid = String(to).trim();
 
-      // Eğer gelen numara @s.whatsapp.net veya @g.us içermiyorsa ve @lid ise temizle/formatla
+      // n8n veya dış kaynaktan gelebilecek baş eşittir işaretlerini temizle
+      targetJid = targetJid.replace(/^=+/, '');
+
+      // @ işareti yoksa sadece rakamları alıp standart WhatsApp numarasına çevir
       if (!targetJid.includes('@')) {
         const cleanNumber = targetJid.replace(/[^\d]/g, '');
         targetJid = `${cleanNumber}@s.whatsapp.net`;
@@ -356,7 +363,7 @@ class WhatsAppService {
       logger.info({
         msg: 'Message sent',
         to: targetJid,
-        messageId: result.key.id,
+        messageId: result?.key?.id,
       });
       return result;
     } catch (error) {
