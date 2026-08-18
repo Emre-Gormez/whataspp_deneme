@@ -339,17 +339,31 @@ class WhatsAppService {
   }
 
   async sendMessage(to, message) {
-    if (!this.isConnected || !this.sock) {
+    if (!this.isConnected) {
       throw new Error('WhatsApp connection is not active');
     }
 
     try {
-      const formattedTo = to.includes('@') ? to : `${to.replace(/[^\d]/g, '')}@s.whatsapp.net`;
-      const result = await this.sock.sendMessage(formattedTo, { text: message });
-      logger.info({ msg: 'Message sent', to: formattedTo, messageId: result.key.id });
+      let targetJid = to;
+
+      // Eğer gelen numara @s.whatsapp.net veya @g.us içermiyorsa ve @lid ise temizle/formatla
+      if (!targetJid.includes('@')) {
+        const cleanNumber = targetJid.replace(/[^\d]/g, '');
+        targetJid = `${cleanNumber}@s.whatsapp.net`;
+      }
+
+      const result = await this.sock.sendMessage(targetJid, { text: message });
+      logger.info({
+        msg: 'Message sent',
+        to: targetJid,
+        messageId: result.key.id,
+      });
       return result;
     } catch (error) {
-      errorLogger.error({ msg: 'Failed to send message', error: error.message });
+      errorLogger.error({
+        msg: 'Failed to send message',
+        error: error.message,
+      });
       throw error;
     }
   }
